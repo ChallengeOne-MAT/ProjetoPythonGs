@@ -1,151 +1,120 @@
+from flask import Flask, jsonify, request
 import cx_Oracle
-import json
+import datetime
 
-# Conexão com o banco Oracle
+app = Flask(__name__)
+
+# Configuração do banco Oracle
+USER = "rm561090"
+PASSWORD = "fiap25"
+DSN = cx_Oracle.makedsn("oracle.fiap.com.br", 1521, service_name="orcl")
+
 def conectar():
     try:
-        conn = cx_Oracle.connect("usuario", "senha", "host:porta/sid")
+        conn = cx_Oracle.connect(user=USER, password=PASSWORD, dsn=DSN)
         return conn
-    except cx_Oracle.Error as e:
+    except cx_Oracle.DatabaseError as e:
         print("Erro ao conectar ao banco:", e)
         return None
 
-# Inserir usuário
-def inserir_usuario(conn):
+def convert_value(value):
+    if value is None:
+        return None
+    elif isinstance(value, datetime.datetime):
+        return value.isoformat()
+    elif isinstance(value, datetime.date):
+        return value.isoformat()
+    elif isinstance(value, bytes):
+        return value.decode('utf-8', errors='ignore')
+    elif isinstance(value, cx_Oracle.LOB):
+        return value.read()
+    else:
+        return str(value)
+
+def fetch_all_from(table):
     try:
-        nome = input("Nome: ")
-        email = input("Email: ")
-        telefone = input("Telefone: ")
-        endereco = input("Endereço: ")
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO SF_Usuario (id_usuario, nome, email, telefone, endereco)
-            VALUES (SF_USUARIO_SEQ.NEXTVAL, :1, :2, :3, :4)
-        """, (nome, email, telefone, endereco))
+        conn = conectar()
+        if conn is None:
+            return jsonify({"erro": "Não foi possível conectar ao banco."}), 500
+
+        cur = conn.cursor()
+        cur.execute(f"SELECT * FROM {table}")
+        colnames = [col[0] for col in cur.description]
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        result = []
+        for row in rows:
+            row_dict = {colnames[i]: convert_value(value) for i, value in enumerate(row)}
+            result.append(row_dict)
+
+        return jsonify(result)
+    except Exception as e:
+        print(f"Erro ao buscar dados da tabela {table}: {e}")
+        return jsonify({"erro": f"Erro ao buscar dados da tabela {table}."}), 500
+
+@app.route("/usuarios", methods=["GET"])
+def get_usuarios():
+    return fetch_all_from("SF_Usuario")
+
+@app.route("/contatos", methods=["GET"])
+def get_contatos():
+    return fetch_all_from("SF_ContatoEmergencia")
+
+@app.route("/autoridades", methods=["GET"])
+def get_autoridades():
+    return fetch_all_from("SF_Autoridade")
+
+@app.route("/categorias", methods=["GET"])
+def get_categorias():
+    return fetch_all_from("SF_CategoriaEvento")
+
+@app.route("/sos", methods=["GET"])
+def get_sos():
+    return fetch_all_from("SF_SOS")
+
+@app.route("/notificacoes", methods=["GET"])
+def get_notificacoes():
+    return fetch_all_from("SF_Notificacao")
+
+@app.route("/mensagens", methods=["GET"])
+def get_mensagens():
+    return fetch_all_from("SF_Mensagem")
+
+@app.route("/ocorrencias", methods=["GET"])
+def get_ocorrencias():
+    return fetch_all_from("SF_Ocorrencia")
+
+@app.route("/cadastro", methods=["POST"])
+def cadastro():
+    data = request.json
+    cpf = data.get("cpf")
+    senha = data.get("senha")
+    confirmar = data.get("confirmar_senha")
+
+    if senha != confirmar:
+        return jsonify({"erro": "Senhas não conferem."}), 400
+
+    try:
+        conn = conectar()
+        if conn is None:
+            return jsonify({"erro": "Erro ao conectar ao banco."}), 500
+
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO SF_Usuario (id_usuario, cpf, senha, telefone)
+            VALUES (SF_USUARIO_SEQ.NEXTVAL, :cpf, :senha, NULL)
+        """, {"cpf": cpf, "senha": senha})
         conn.commit()
-        print("Usuário inserido com sucesso!")
+        cur.close()
+        conn.close()
+        return jsonify({"mensagem": "Usuário cadastrado com sucesso."})
+    except cx_Oracle.IntegrityError:
+        return jsonify({"erro": "CPF já cadastrado."}), 409
     except Exception as e:
-        print("Erro ao inserir usuário:", e)
+        print(f"Erro no cadastro: {e}")
+        return jsonify({"erro": "Erro interno no servidor."}), 500
 
-# Listar usuários
-def listar_usuarios(conn):
-    try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM SF_Usuario")
-        for row in cursor.fetchall():
-            print(row)
-    except Exception as e:
-        print("Erro ao listar usuários:", e)
-
-# Atualizar usuário
-def atualizar_usuario(conn):
-    try:
-        id_usuario = input("ID do usuário a atualizar: ")
-        novo_nome = input("Novo nome: ")
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE SF_Usuario SET nome = :1 WHERE id_usuario = :2
-        """, (novo_nome, id_usuario))
-        conn.commit()
-        print("Usuário atualizado!")
-    except Exception as e:
-        print("Erro ao atualizar:", e)
-
-# Excluir usuário
-def excluir_usuario(conn):
-    try:
-        id_usuario = input("ID do usuário a excluir: ")
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM SF_Usuario WHERE id_usuario = :1", (id_usuario,))
-        conn.commit()
-        print("Usuário excluído.")
-    except Exception as e:
-        print("Erro ao excluir:", e)
-
-# Consulta com filtro e exportação JSON
-def exportar_ocorrencias_por_status(conn):
-    try:
-        status = input("Status da ocorrência (pendente, em andamento, concluída): ")
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM SF_Ocorrencia WHERE status = :1", (status,))
-        rows = cursor.fetchall()
-        colunas = [col[0] for col in cursor.description]
-        resultados = [dict(zip(colunas, row)) for row in rows]
-        with open(f"ocorrencias_{status}.json", "w", encoding='utf-8') as f:
-            json.dump(resultados, f, ensure_ascii=False, indent=4)
-        print("Exportado com sucesso!")
-    except Exception as e:
-        print("Erro ao exportar:", e)
-
-def exportar_autoridades_por_especialidade(conn):
-    try:
-        especialidade = input("Especialidade da autoridade: ")
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM SF_Autoridade WHERE especialidade = :1", (especialidade,))
-        rows = cursor.fetchall()
-        colunas = [col[0] for col in cursor.description]
-        resultados = [dict(zip(colunas, row)) for row in rows]
-        with open("autoridades.json", "w", encoding='utf-8') as f:
-            json.dump(resultados, f, ensure_ascii=False, indent=4)
-        print("Exportado com sucesso!")
-    except Exception as e:
-        print("Erro:", e)
-
-def exportar_mensagens_por_remetente(conn):
-    try:
-        remetente = input("Remetente: ")
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM SF_Mensagem WHERE remetente = :1", (remetente,))
-        rows = cursor.fetchall()
-        colunas = [col[0] for col in cursor.description]
-        resultados = [dict(zip(colunas, row)) for row in rows]
-        with open("mensagens.json", "w", encoding='utf-8') as f:
-            json.dump(resultados, f, ensure_ascii=False, indent=4)
-        print("Exportado com sucesso!")
-    except Exception as e:
-        print("Erro:", e)
-
-# Menu principal
-def menu():
-    conn = conectar()
-    if conn is None:
-        return
-
-    while True:
-        print("\n--- MENU ---")
-        print("1. Inserir usuário")
-        print("2. Listar usuários")
-        print("3. Atualizar usuário")
-        print("4. Excluir usuário")
-        print("5. Exportar ocorrências por status (JSON)")
-        print("6. Exportar autoridades por especialidade (JSON)")
-        print("7. Exportar mensagens por remetente (JSON)")
-        print("0. Sair")
-        
-        opcao = input("Escolha: ")
-
-        if opcao == '1':
-            inserir_usuario(conn)
-        elif opcao == '2':
-            listar_usuarios(conn)
-        elif opcao == '3':
-            atualizar_usuario(conn)
-        elif opcao == '4':
-            excluir_usuario(conn)
-        elif opcao == '5':
-            exportar_ocorrencias_por_status(conn)
-        elif opcao == '6':
-            exportar_autoridades_por_especialidade(conn)
-        elif opcao == '7':
-            exportar_mensagens_por_remetente(conn)
-        elif opcao == '0':
-            print("Saindo...")
-            break
-        else:
-            print("Opção inválida. Tente novamente.")
-
-    conn.close()
-
-# Executar o programa
 if __name__ == "__main__":
-    menu()
+    app.run(debug=True)
